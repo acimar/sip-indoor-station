@@ -504,6 +504,7 @@ class SipServer:
             remote_rtp_port=session.remote_port,
             selected_codec=session.codec,
             selected_payload_type=session.payload_type,
+            station_clock_rate=session.clock_rate,
             jitter_buffer_ms=self.config.rtp_jitter_buffer_ms,
             single_peer=self.config.webrtc_single_peer,
             stun_servers=self.config.webrtc_stun_servers,

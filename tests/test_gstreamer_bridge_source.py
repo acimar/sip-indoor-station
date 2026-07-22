@@ -271,3 +271,35 @@ def test_gstreamer_bridge_g711_uses_8k_raw_rate() -> None:
     )
     assert bridge._sip_raw_rate == 8000
     assert "clock-rate=8000,encoding-name=PCMA,payload=8" in bridge._pipeline_description()
+
+
+def test_opus_16k_wire_clock_inserts_capssetter_to_48k() -> None:
+    # Hikvision sends Opus with a 16000 RTP clock; the jitterbuffer must use 16000
+    # (correct timing), then caps are rewritten to 48000 for rtpopusdepay.
+    bridge = GStreamerWebRtcBridge(
+        call_id="c", local_media_ip="192.168.0.2", local_rtp_port=40000,
+        remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
+        selected_codec="OPUS", selected_payload_type=115, station_clock_rate=16000,
+    )
+    p = bridge._pipeline_description()
+    assert "clock-rate=16000,encoding-name=OPUS,payload=115" in p  # udpsrc/jitterbuffer
+    assert "capssetter replace=true" in p
+    assert "clock-rate=48000,encoding-name=OPUS,payload=115" in p  # rewritten for depay
+
+
+def test_opus_matching_clock_needs_no_capssetter() -> None:
+    bridge = GStreamerWebRtcBridge(
+        call_id="c", local_media_ip="192.168.0.2", local_rtp_port=40000,
+        remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
+        selected_codec="OPUS", selected_payload_type=115, station_clock_rate=48000,
+    )
+    assert "capssetter" not in bridge._pipeline_description()
+
+
+def test_g711_never_uses_capssetter() -> None:
+    bridge = GStreamerWebRtcBridge(
+        call_id="c", local_media_ip="192.168.0.2", local_rtp_port=40000,
+        remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
+        selected_codec="PCMA", selected_payload_type=8, station_clock_rate=8000,
+    )
+    assert "capssetter" not in bridge._pipeline_description()

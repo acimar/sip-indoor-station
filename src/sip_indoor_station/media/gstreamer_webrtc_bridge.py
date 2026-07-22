@@ -69,6 +69,7 @@ class GStreamerWebRtcBridge(MediaSession):
         local_bind_ip: str = "0.0.0.0",
         selected_codec: str = "PCMU",
         selected_payload_type: int = 0,
+        station_clock_rate: int | None = None,
         jitter_buffer_ms: int = 60,
         single_peer: bool = True,
         stun_servers: list[str] | None = None,
@@ -87,6 +88,11 @@ class GStreamerWebRtcBridge(MediaSession):
         self.remote_rtp_port = remote_rtp_port
         self.selected_codec = selected_codec.upper()
         self.selected_payload_type = selected_payload_type
+        # Actual RTP timestamp clock the door station uses on the wire. May differ
+        # from the codec's gst_clock_rate (Hikvision sends Opus with a 16000 clock
+        # while GStreamer's rtpopusdepay requires 48000 caps). Defaults to the
+        # codec's gst rate when unknown.
+        self.station_clock_rate = station_clock_rate
         self.jitter_buffer_ms = jitter_buffer_ms
         self.single_peer = single_peer
         self.stun_servers = stun_servers or []
@@ -327,11 +333,25 @@ class GStreamerWebRtcBridge(MediaSession):
 
     def _pipeline_description(self) -> str:
         codec = self.sip_audio_elements
+        # The udpsrc caps and rtpjitterbuffer must use the RTP clock the station
+        # actually sends (station_clock_rate) so packet timing is correct. When
+        # that differs from what the depayloader requires (e.g. Hikvision Opus at
+        # 16000 vs rtpopusdepay's mandatory 48000), rewrite the caps clock-rate
+        # right before the depayloader — the Opus bitstream is self-describing, so
+        # opusdec still recovers the audio while the jitterbuffer keeps correct time.
+        wire_rate = self.station_clock_rate or codec.gst_clock_rate
+        pre_depay = ""
+        if wire_rate != codec.gst_clock_rate:
+            pre_depay = (
+                f'capssetter replace=true caps="application/x-rtp,media=audio,'
+                f'clock-rate={codec.gst_clock_rate},encoding-name={codec.encoding_name},'
+                f'payload={self.selected_payload_type}" ! '
+            )
         return (
             f"udpsrc name=station_rtp_src port={self.local_rtp_port} "
-            f'caps="application/x-rtp,media=audio,clock-rate={codec.gst_clock_rate},encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
+            f'caps="application/x-rtp,media=audio,clock-rate={wire_rate},encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
             f"! queue ! rtpjitterbuffer latency={self.jitter_buffer_ms} "
-            f"! {codec.depay} ! {codec.decoder} ! audioconvert ! audioresample "
+            f"! {pre_depay}{codec.depay} ! {codec.decoder} ! audioconvert ! audioresample "
             "! audio/x-raw,rate=48000,channels=1 "
             f"! queue ! opusenc ! rtpopuspay name=browser_audio_pay pt={self.webrtc_opus_payload_type} "
             f'! capsfilter name=browser_audio_caps caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload={self.webrtc_opus_payload_type}" '
