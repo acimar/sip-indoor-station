@@ -62,13 +62,17 @@ def parse_sdp(body: str) -> SdpOffer:
 # Static payload types (RFC 3551) that may appear without an explicit rtpmap.
 _STATIC_AUDIO_CODECS = {0: ("PCMU", 8000), 8: ("PCMA", 8000)}
 
-# Eligibility per codec: required clock rate (None = any). OPUS in RTP is only
-# standard at 48000 (RFC 7587); offers announcing other rates (e.g. Hikvision's
-# OPUS/16000) do not match GStreamer's rtpopusdepay/pay templates and are skipped.
+# Eligibility per codec: required RTP clock rate (None = accept any advertised
+# rate). PCMA/PCMU are 8000 by definition. OPUS is left as None on purpose: some
+# door stations (e.g. Hikvision) advertise a non-standard OPUS/16000. The Opus
+# bitstream is self-describing, so we accept the offer, echo its advertised rate
+# in the SDP answer (so the device agrees), and force the RTP-standard 48000 in
+# the GStreamer receive caps (rtpopusdepay requires 48000) — opusdec then decodes
+# whatever wideband audio the device actually sends.
 _CODEC_CLOCK_REQUIREMENTS: dict[str, int | None] = {
     "PCMA": 8000,
     "PCMU": 8000,
-    "OPUS": 48000,
+    "OPUS": None,
     "MP4A-LATM": None,
 }
 

@@ -68,12 +68,12 @@ def test_default_preference_ignores_offered_wideband() -> None:
     assert select_audio_codec(parse_sdp(HIK_SDP)) == ("PCMA", 8, 8000)
 
 
-def test_opus_at_nonstandard_clock_is_rejected() -> None:
-    # KEY FINDING: this doorbell offers OPUS/16000, but RTP Opus is standard only
-    # at 48000 (GStreamer rtpopusdepay/pay). Even when Opus is preferred, the 16k
-    # offer must be skipped rather than negotiated into a broken pipeline.
+def test_opus_at_nonstandard_clock_is_accepted_echoing_offered_rate() -> None:
+    # This doorbell offers OPUS/16000. We accept it and return the ADVERTISED
+    # 16000 (echoed in the SDP answer so the device agrees); the GStreamer receive
+    # pipeline separately forces 48000 in the caps (rtpopusdepay requirement).
     got = select_audio_codec(parse_sdp(HIK_SDP), preference=["OPUS", "PCMA"])
-    assert got == ("PCMA", 8, 8000)
+    assert got == ("OPUS", 115, 16000)
 
 
 def test_opus_selected_when_offered_at_48k() -> None:
