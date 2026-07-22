@@ -29,7 +29,7 @@ def test_gstreamer_bridge_builds_pcmu_pipeline_by_default() -> None:
     )
     pipeline = bridge._pipeline_description()
     assert "encoding-name=PCMU,payload=0" in pipeline
-    assert "! rtppcmudepay ! mulawdec name=sip_decoder !" in pipeline
+    assert "! rtppcmudepay ! mulawdec !" in pipeline
 
 
 def test_gstreamer_bridge_builds_pcma_pipeline_when_selected() -> None:
@@ -44,7 +44,7 @@ def test_gstreamer_bridge_builds_pcma_pipeline_when_selected() -> None:
     )
     pipeline = bridge._pipeline_description()
     assert "encoding-name=PCMA,payload=8" in pipeline
-    assert "! rtppcmadepay ! alawdec name=sip_decoder !" in pipeline
+    assert "! rtppcmadepay ! alawdec !" in pipeline
     assert bridge.sip_audio_elements.encoder == "alawenc"
     assert bridge.sip_audio_elements.pay == "rtppcmapay"
 
@@ -255,7 +255,7 @@ def test_gstreamer_bridge_builds_opus_pipeline_with_forced_48k_caps() -> None:
     )
     pipeline = bridge._pipeline_description()
     assert "clock-rate=48000,encoding-name=OPUS,payload=115" in pipeline
-    assert "! rtpopusdepay ! opusdec name=sip_decoder !" in pipeline
+    assert "! rtpopusdepay ! opusdec !" in pipeline
     assert bridge._sip_raw_rate == 48000
 
 
@@ -279,30 +279,3 @@ def _bridge(codec, pt, station_clock):
         remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
         selected_codec=codec, selected_payload_type=pt, station_clock_rate=station_clock,
     )
-
-
-def test_opus_16k_prerolls_at_48k_and_needs_retimestamp() -> None:
-    # Hikvision stamps Opus at a non-standard clock (advertised 16000). udpsrc
-    # advertises 48000 so rtpopusdepay is satisfied and the branch prerolls; the
-    # PTS is then fixed by the retimestamp probe (not a caps-rewriting element).
-    b = _bridge("OPUS", 115, 16000)
-    p = b._pipeline_description()
-    assert "clock-rate=48000,encoding-name=OPUS,payload=115" in p
-    assert "name=sip_decoder" in p
-    assert "capssetter" not in p and "mode=none" not in p  # both broke preroll
-    assert b._needs_retimestamp is True
-
-
-def test_opus_standard_48k_clock_no_retimestamp() -> None:
-    assert _bridge("OPUS", 115, 48000)._needs_retimestamp is False
-
-
-def test_g711_no_retimestamp() -> None:
-    b = _bridge("PCMA", 8, 8000)
-    assert b._needs_retimestamp is False
-    assert "mode=none" not in b._pipeline_description()
-
-
-def test_unknown_station_clock_no_retimestamp() -> None:
-    # station_clock_rate=None (not negotiated) must not trigger retimestamping.
-    assert _bridge("OPUS", 115, None)._needs_retimestamp is False

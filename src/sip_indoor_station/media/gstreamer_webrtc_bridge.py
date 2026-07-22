@@ -271,9 +271,6 @@ class GStreamerWebRtcBridge(MediaSession):
             raise RuntimeError("GStreamer pipeline did not create webrtcbin")
         webrtc.set_property("bundle-policy", self._webrtc_api.WebRTCBundlePolicy.MAX_BUNDLE)
 
-        if self._needs_retimestamp:
-            self._install_retimestamp_probe(pipeline)
-
         if self.ice_udp_port is not None:
             ice_agent = webrtc.get_property("ice-agent")
 
@@ -334,30 +331,21 @@ class GStreamerWebRtcBridge(MediaSession):
         """
         return 48000 if self.selected_codec == "OPUS" else 8000
 
-    @property
-    def _needs_retimestamp(self) -> bool:
-        """True when the station's RTP clock differs from the depayloader's.
-
-        rtpopusdepay mandates a 48000 caps clock, but some door stations stamp
-        Opus at a non-standard rate (Hikvision advertises 16000 and stamps as if
-        8000: 320 units per 40 ms frame). Interpreting those timestamps at 48000
-        compresses PTS ~6x, so the browser plays chopped audio. When this holds,
-        we rewrite PTS after the decoder from the accumulated buffer durations
-        (which the decoder reports correctly) — see _install_retimestamp_probe.
-        """
-        return bool(self.station_clock_rate) and self.station_clock_rate != self.sip_audio_elements.gst_clock_rate
-
     def _pipeline_description(self) -> str:
         codec = self.sip_audio_elements
         # udpsrc advertises the codec's GStreamer clock (48000 for Opus — what
         # rtpopusdepay mandates) so the whole receive branch prerolls and WebRTC
-        # reaches PLAYING. The decoder is named so a pad probe can fix PTS when
-        # the station's RTP clock is non-standard (see _needs_retimestamp).
+        # reaches PLAYING. This is the 0.2.1 receive shape (the one that connects);
+        # a decoder-side retimestamp probe was tried and REMOVED — it set 0-based
+        # PTS while the pipeline clock was already running, so webrtcbin treated
+        # buffers as past-due and dropped the media ('audio connecting' ->
+        # 'disconnected'). It was also redundant: opusenc regenerates a steady
+        # output PTS regardless (proven in the offline lab).
         return (
             f"udpsrc name=station_rtp_src port={self.local_rtp_port} "
             f'caps="application/x-rtp,media=audio,clock-rate={codec.gst_clock_rate},encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
             f"! queue ! rtpjitterbuffer latency={self.jitter_buffer_ms} "
-            f"! {codec.depay} ! {codec.decoder} name=sip_decoder ! audioconvert ! audioresample "
+            f"! {codec.depay} ! {codec.decoder} ! audioconvert ! audioresample "
             "! audio/x-raw,rate=48000,channels=1 "
             # Browser-facing Opus tuned for lossy links (WiFi/4G): in-band FEC lets
             # the browser reconstruct dropped packets, packet-loss-percentage sizes
@@ -367,46 +355,6 @@ class GStreamerWebRtcBridge(MediaSession):
             f"! rtpopuspay name=browser_audio_pay pt={self.webrtc_opus_payload_type} "
             f'! capsfilter name=browser_audio_caps caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload={self.webrtc_opus_payload_type}" '
             "! queue ! webrtcbin name=webrtc"
-        )
-
-    def _install_retimestamp_probe(self, pipeline: Any) -> None:
-        """Rewrite decoded-audio PTS from accumulated buffer durations.
-
-        Neutralises the ~6x PTS compression caused by a non-standard station RTP
-        clock (see _needs_retimestamp). The decoder sets each buffer's duration
-        correctly (e.g. 40 ms per Opus frame), so a monotonic PTS built from those
-        durations restores real-time playback. Validated offline against real
-        Hikvision Opus RTP: 6.7 ms -> 40.0 ms median PTS delta.
-        """
-        decoder = pipeline.get_by_name("sip_decoder")
-        if decoder is None:
-            LOGGER.warning("retimestamp_probe_no_decoder call_id=%s", self.call_id)
-            return
-        src_pad = decoder.get_static_pad("src")
-        if src_pad is None:
-            LOGGER.warning("retimestamp_probe_no_src_pad call_id=%s", self.call_id)
-            return
-        acc = {"pts": 0}
-        gst = self._gst
-
-        def _retime(_pad: Any, info: Any) -> Any:
-            try:
-                buf = info.get_buffer()
-                buf.pts = acc["pts"]
-                buf.dts = acc["pts"]
-                duration = buf.duration
-                if duration and duration != gst.CLOCK_TIME_NONE:
-                    acc["pts"] += duration
-            except Exception:
-                LOGGER.debug("retimestamp_probe_failed call_id=%s", self.call_id, exc_info=True)
-            return gst.PadProbeReturn.OK
-
-        src_pad.add_probe(gst.PadProbeType.BUFFER, _retime)
-        LOGGER.info(
-            "retimestamp_probe_installed call_id=%s station_clock=%s depay_clock=%s",
-            self.call_id,
-            self.station_clock_rate,
-            self.sip_audio_elements.gst_clock_rate,
         )
 
     async def _run_gst_offer_answer(self, sdp: str) -> str:
