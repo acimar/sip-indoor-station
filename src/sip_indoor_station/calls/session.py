@@ -22,6 +22,7 @@ class CallSession:
     remote_port: int
     codec: str
     payload_type: int
+    clock_rate: int = 8000
     video_offered: bool = False
     video_payload_types: list[int] | None = None
     video_codec_mappings: dict[int, str] | None = None

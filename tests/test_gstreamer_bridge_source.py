@@ -239,3 +239,35 @@ def test_gstreamer_bridge_rejects_invalid_fixed_ice_udp_port() -> None:
 
     with pytest.raises(ValueError, match="invalid WebRTC ICE UDP port"):
         bridge._validate_ice_udp_port()
+
+
+def test_gstreamer_bridge_builds_opus_pipeline_with_forced_48k_caps() -> None:
+    # The door station advertises OPUS/16000, but rtpopusdepay requires 48000.
+    # The receive caps must force 48000 so packets flow; opusdec recovers the audio.
+    bridge = GStreamerWebRtcBridge(
+        call_id="call-opus",
+        local_media_ip="192.168.0.2",
+        local_rtp_port=40000,
+        remote_rtp_ip="192.168.18.30",
+        remote_rtp_port=9654,
+        selected_codec="OPUS",
+        selected_payload_type=115,
+    )
+    pipeline = bridge._pipeline_description()
+    assert "clock-rate=48000,encoding-name=OPUS,payload=115" in pipeline
+    assert "! rtpopusdepay ! opusdec !" in pipeline
+    assert bridge._sip_raw_rate == 48000
+
+
+def test_gstreamer_bridge_g711_uses_8k_raw_rate() -> None:
+    bridge = GStreamerWebRtcBridge(
+        call_id="call-g711",
+        local_media_ip="192.168.0.2",
+        local_rtp_port=40000,
+        remote_rtp_ip="192.168.18.30",
+        remote_rtp_port=9654,
+        selected_codec="PCMA",
+        selected_payload_type=8,
+    )
+    assert bridge._sip_raw_rate == 8000
+    assert "clock-rate=8000,encoding-name=PCMA,payload=8" in bridge._pipeline_description()

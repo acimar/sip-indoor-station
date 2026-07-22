@@ -51,6 +51,9 @@ class Config:
     sip_users: dict[str, SipUser] = field(default_factory=dict)
     sip_reject_response_code: int = int(os.getenv("SIP_REJECT_RESPONSE_CODE", "486"))
     sip_reject_response_reason: str = os.getenv("SIP_REJECT_RESPONSE_REASON", "Busy Here")
+    audio_codec_preference: list[str] = field(
+        default_factory=lambda: env_csv("AUDIO_CODEC_PREFERENCE") or ["PCMA", "PCMU"]
+    )
     rtp_port_min: int = int(os.getenv("RTP_PORT_MIN", "40000"))
     rtp_port_max: int = int(os.getenv("RTP_PORT_MAX", "40100"))
     rtp_jitter_buffer_ms: int = int(os.getenv("RTP_JITTER_BUFFER_MS", "60"))

@@ -262,11 +262,11 @@ class SipServer:
             return [response_from_request(request, 488, "Not Acceptable Here")]
 
         offer = parse_sdp(request.body)
-        selected = select_audio_codec(offer)
+        selected = select_audio_codec(offer, preference=self.config.audio_codec_preference)
         if not selected or not offer.remote_ip or not offer.audio_port:
             return [response_from_request(request, 488, "Not Acceptable Here")]
 
-        codec, payload_type = selected
+        codec, payload_type, clock_rate = selected
         remote_target_uri = contact_uri_from_header(request.headers.get("Contact")) or request.uri
         local_rtp_port = self.port_allocator.allocate(self.config.listen_address)
         LOGGER.info(
@@ -293,6 +293,7 @@ class SipServer:
             remote_port=offer.audio_port,
             codec=codec,
             payload_type=payload_type,
+            clock_rate=clock_rate,
             video_offered=offer.video_offered,
             video_payload_types=list(offer.video_payload_types),
             video_codec_mappings=dict(offer.video_codec_mappings),
@@ -487,6 +488,7 @@ class SipServer:
             reject_video_payload_types=session.video_payload_types if session.video_offered else None,
             reject_video_codec_mappings=session.video_codec_mappings,
             reject_video_fmtp=session.video_fmtp,
+            clock_rate=session.clock_rate,
         )
         return session.sdp_answer
 

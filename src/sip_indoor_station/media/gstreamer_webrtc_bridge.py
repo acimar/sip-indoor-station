@@ -22,6 +22,12 @@ class SipAudioCodecElements:
     decoder: str
     encoder: str
     pay: str
+    # RTP clock-rate the GStreamer elements require in caps. For Opus this is
+    # always 48000 (RFC 7587 / rtpopusdepay), regardless of what the door
+    # station advertises (Hikvision announces OPUS/16000) — the Opus bitstream
+    # is self-describing, so forcing 48000 in the receive caps lets the packets
+    # flow while opusdec still recovers the true wideband audio.
+    gst_clock_rate: int = 8000
 
 
 SIP_AUDIO_CODECS = {
@@ -31,6 +37,7 @@ SIP_AUDIO_CODECS = {
         decoder="mulawdec",
         encoder="mulawenc",
         pay="rtppcmupay",
+        gst_clock_rate=8000,
     ),
     "PCMA": SipAudioCodecElements(
         encoding_name="PCMA",
@@ -38,6 +45,15 @@ SIP_AUDIO_CODECS = {
         decoder="alawdec",
         encoder="alawenc",
         pay="rtppcmapay",
+        gst_clock_rate=8000,
+    ),
+    "OPUS": SipAudioCodecElements(
+        encoding_name="OPUS",
+        depay="rtpopusdepay",
+        decoder="opusdec",
+        encoder="opusenc",
+        pay="rtpopuspay",
+        gst_clock_rate=48000,
     ),
 }
 
@@ -300,11 +316,20 @@ class GStreamerWebRtcBridge(MediaSession):
         if self.ice_udp_port is not None and (self.ice_udp_port < 1 or self.ice_udp_port > 65535):
             raise ValueError(f"invalid WebRTC ICE UDP port: {self.ice_udp_port}")
 
+    @property
+    def _sip_raw_rate(self) -> int:
+        """Raw-audio sample rate on the SIP side of the bridge.
+
+        G.711 is 8 kHz; Opus works natively at 48 kHz (matches the browser leg,
+        avoiding an extra resample). Used for both decode-out and encode-in caps.
+        """
+        return 48000 if self.selected_codec == "OPUS" else 8000
+
     def _pipeline_description(self) -> str:
         codec = self.sip_audio_elements
         return (
             f"udpsrc name=station_rtp_src port={self.local_rtp_port} "
-            f'caps="application/x-rtp,media=audio,clock-rate=8000,encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
+            f'caps="application/x-rtp,media=audio,clock-rate={codec.gst_clock_rate},encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
             f"! queue ! rtpjitterbuffer latency={self.jitter_buffer_ms} "
             f"! {codec.depay} ! {codec.decoder} ! audioconvert ! audioresample "
             "! audio/x-raw,rate=48000,channels=1 "
@@ -461,10 +486,18 @@ class GStreamerWebRtcBridge(MediaSession):
         convert = self._gst.ElementFactory.make("audioconvert")
         resample = self._gst.ElementFactory.make("audioresample")
         capsfilter = self._gst.ElementFactory.make("capsfilter")
-        capsfilter.set_property("caps", self._gst.Caps.from_string("audio/x-raw,format=S16LE,rate=8000,channels=1"))
+        capsfilter.set_property(
+            "caps",
+            self._gst.Caps.from_string(f"audio/x-raw,format=S16LE,rate={self._sip_raw_rate},channels=1"),
+        )
         enc = self._gst.ElementFactory.make(codec.encoder)
         pay = self._gst.ElementFactory.make(codec.pay)
         pay.set_property("pt", int(self.selected_payload_type))
+        if codec.encoding_name == "OPUS":
+            # Match the door station's advertised (non-standard) 16 kHz Opus: encode
+            # narrower audio so the device's decoder timing stays sane. opusenc keeps
+            # the bitstream self-describing, so this only bounds the bandwidth.
+            enc.set_property("audio-type", "voice")
         sink = self._gst.ElementFactory.make("udpsink")
         self._configure_station_udp_sink(sink)
         queue = self._gst.ElementFactory.make("queue")
