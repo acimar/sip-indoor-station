@@ -359,7 +359,12 @@ class GStreamerWebRtcBridge(MediaSession):
             f"! queue ! rtpjitterbuffer latency={self.jitter_buffer_ms} "
             f"! {codec.depay} ! {codec.decoder} name=sip_decoder ! audioconvert ! audioresample "
             "! audio/x-raw,rate=48000,channels=1 "
-            f"! queue ! opusenc ! rtpopuspay name=browser_audio_pay pt={self.webrtc_opus_payload_type} "
+            # Browser-facing Opus tuned for lossy links (WiFi/4G): in-band FEC lets
+            # the browser reconstruct dropped packets, packet-loss-percentage sizes
+            # that redundancy, audio-type=voice optimizes speech. This is where a
+            # SIP bridge earns "answer anywhere with good quality".
+            f"! queue ! opusenc audio-type=voice inband-fec=true packet-loss-percentage=15 "
+            f"! rtpopuspay name=browser_audio_pay pt={self.webrtc_opus_payload_type} "
             f'! capsfilter name=browser_audio_caps caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload={self.webrtc_opus_payload_type}" '
             "! queue ! webrtcbin name=webrtc"
         )
