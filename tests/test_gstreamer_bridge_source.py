@@ -273,33 +273,34 @@ def test_gstreamer_bridge_g711_uses_8k_raw_rate() -> None:
     assert "clock-rate=8000,encoding-name=PCMA,payload=8" in bridge._pipeline_description()
 
 
-def test_opus_16k_wire_clock_inserts_capssetter_to_48k() -> None:
-    # Hikvision sends Opus with a 16000 RTP clock; the jitterbuffer must use 16000
-    # (correct timing), then caps are rewritten to 48000 for rtpopusdepay.
+def test_opus_16k_wire_clock_uses_jitterbuffer_mode_none() -> None:
+    # Hikvision stamps Opus at a non-standard 16000 clock. udpsrc still advertises
+    # 48000 (so the branch prerolls and rtpopusdepay is satisfied), and the
+    # jitterbuffer runs mode=none to avoid clock-based mis-scheduling (choppiness).
     bridge = GStreamerWebRtcBridge(
         call_id="c", local_media_ip="192.168.0.2", local_rtp_port=40000,
         remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
         selected_codec="OPUS", selected_payload_type=115, station_clock_rate=16000,
     )
     p = bridge._pipeline_description()
-    assert "clock-rate=16000,encoding-name=OPUS,payload=115" in p  # udpsrc/jitterbuffer
-    assert "capssetter replace=true" in p
-    assert "clock-rate=48000,encoding-name=OPUS,payload=115" in p  # rewritten for depay
+    assert "clock-rate=48000,encoding-name=OPUS,payload=115" in p  # udpsrc prerolls at 48k
+    assert "rtpjitterbuffer mode=none" in p
+    assert "capssetter" not in p  # no caps-rewriting element (breaks preroll)
 
 
-def test_opus_matching_clock_needs_no_capssetter() -> None:
+def test_opus_matching_clock_no_mode_none() -> None:
     bridge = GStreamerWebRtcBridge(
         call_id="c", local_media_ip="192.168.0.2", local_rtp_port=40000,
         remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
         selected_codec="OPUS", selected_payload_type=115, station_clock_rate=48000,
     )
-    assert "capssetter" not in bridge._pipeline_description()
+    assert "mode=none" not in bridge._pipeline_description()
 
 
-def test_g711_never_uses_capssetter() -> None:
+def test_g711_no_mode_none() -> None:
     bridge = GStreamerWebRtcBridge(
         call_id="c", local_media_ip="192.168.0.2", local_rtp_port=40000,
         remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
         selected_codec="PCMA", selected_payload_type=8, station_clock_rate=8000,
     )
-    assert "capssetter" not in bridge._pipeline_description()
+    assert "mode=none" not in bridge._pipeline_description()
