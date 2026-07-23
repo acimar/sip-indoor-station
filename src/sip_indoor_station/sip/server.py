@@ -514,6 +514,9 @@ class SipServer:
             ice_transport_policy=self.config.webrtc_ice_transport_policy,
             ice_candidates=self.local_ice_candidates(),
             ice_udp_port=self.config.webrtc_ice_udp_port,
+            opus_audio_type=self.config.opus_audio_type,
+            opus_packet_loss_percentage=self.config.opus_packet_loss_percentage,
+            clock_fix=self.config.rtp_clock_fix,
         )
 
     def active_media_session(self) -> MediaSession | None:

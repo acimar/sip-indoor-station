@@ -56,7 +56,19 @@ class Config:
     )
     rtp_port_min: int = int(os.getenv("RTP_PORT_MIN", "40000"))
     rtp_port_max: int = int(os.getenv("RTP_PORT_MAX", "40100"))
-    rtp_jitter_buffer_ms: int = int(os.getenv("RTP_JITTER_BUFFER_MS", "60"))
+    rtp_jitter_buffer_ms: int = env_int("RTP_JITTER_BUFFER_MS", 60)
+    # Browser-facing Opus encoder tuning (live-adjustable via add-on options).
+    # audio_type: opusenc audio-type (voice|generic). generic sounds less
+    # processed; voice optimises speech. packet_loss_percentage sizes the in-band
+    # FEC redundancy — helps lossy links (4G) but is pure overhead (metallic) on a
+    # clean one, so 0 disables FEC.
+    opus_audio_type: str = os.getenv("OPUS_AUDIO_TYPE") or "voice"
+    opus_packet_loss_percentage: int = env_int("OPUS_PACKET_LOSS_PERCENTAGE", 15)
+    # Receive-side clock correction for the Hikvision OPUS/16000 quirk (stamps 320
+    # units per 40ms frame = an 8000 cadence while the pipeline runs at 48000).
+    # off | ts6 (rewrite RTP ts x6) | capssetter (advertise 16000 -> caps 48000) |
+    # jbnone (rtpjitterbuffer mode=none). Only applied for OPUS.
+    rtp_clock_fix: str = (os.getenv("RTP_CLOCK_FIX") or "off").strip().lower()
     http_port: int = int(os.getenv("HTTP_PORT", "8080"))
     webrtc_single_peer: bool = env_bool("WEBRTC_SINGLE_PEER", True)
     webrtc_ice_candidates: list[str] = field(default_factory=lambda: env_csv("WEBRTC_ICE_CANDIDATES"))

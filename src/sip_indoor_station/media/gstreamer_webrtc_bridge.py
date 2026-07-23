@@ -4,6 +4,7 @@ import asyncio
 import logging
 import re
 import ctypes
+import struct
 import threading
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -79,6 +80,9 @@ class GStreamerWebRtcBridge(MediaSession):
         ice_transport_policy: str = "all",
         ice_candidates: list[str] | None = None,
         ice_udp_port: int | None = None,
+        opus_audio_type: str = "voice",
+        opus_packet_loss_percentage: int = 15,
+        clock_fix: str = "off",
     ) -> None:
         self.call_id = call_id
         self.local_media_ip = local_media_ip
@@ -94,6 +98,9 @@ class GStreamerWebRtcBridge(MediaSession):
         # codec's gst rate when unknown.
         self.station_clock_rate = station_clock_rate
         self.jitter_buffer_ms = jitter_buffer_ms
+        self.opus_audio_type = opus_audio_type or "voice"
+        self.opus_packet_loss_percentage = opus_packet_loss_percentage
+        self.clock_fix = (clock_fix or "off").strip().lower()
         self.single_peer = single_peer
         self.stun_servers = stun_servers or []
         self.turn_servers = turn_servers or []
@@ -266,6 +273,8 @@ class GStreamerWebRtcBridge(MediaSession):
     def _build_pipeline(self) -> tuple[Any, Any]:
         self._validate_ice_udp_port()
         pipeline = self._gst.parse_launch(self._pipeline_description())
+        if self.clock_fix == "ts6" and self.selected_codec == "OPUS":
+            self._install_ts6_clock_probe(pipeline)
         webrtc = pipeline.get_by_name("webrtc")
         if webrtc is None:
             raise RuntimeError("GStreamer pipeline did not create webrtcbin")
@@ -335,27 +344,81 @@ class GStreamerWebRtcBridge(MediaSession):
         codec = self.sip_audio_elements
         # udpsrc advertises the codec's GStreamer clock (48000 for Opus — what
         # rtpopusdepay mandates) so the whole receive branch prerolls and WebRTC
-        # reaches PLAYING. This is the 0.2.1 receive shape (the one that connects);
-        # a decoder-side retimestamp probe was tried and REMOVED — it set 0-based
-        # PTS while the pipeline clock was already running, so webrtcbin treated
-        # buffers as past-due and dropped the media ('audio connecting' ->
-        # 'disconnected'). It was also redundant: opusenc regenerates a steady
-        # output PTS regardless (proven in the offline lab).
+        # reaches PLAYING. This is the 0.2.1 receive shape (the one that connects).
+        #
+        # clock_fix corrects the Hikvision OPUS/16000 quirk (320 units per 40ms
+        # frame = an 8000 cadence, so the media clock advances 6x too slow at
+        # 48000). OPUS-only; a genuine G.711 8000 clock needs no correction. Modes:
+        #   off        — receive shape as-is (jitterbuffer absorbs the drift; the
+        #                offline lab proved 0 loss, but webrtcbin's live sync can
+        #                still resync => the browser-side "robotic cuts").
+        #   ts6        — rewrite the RTP timestamp x6 at ingress (installed in
+        #                _build_pipeline), restoring a true 40ms/48000 cadence.
+        #   capssetter — advertise the real 16000 into the jitterbuffer, then
+        #                rewrite caps to the 48000 rtpopusdepay mandates (lab V3).
+        #   jbnone     — rtpjitterbuffer mode=none (no timestamp-based scheduling).
+        is_opus = self.selected_codec == "OPUS"
+        fix = self.clock_fix if is_opus else "off"
+        udp_clock = codec.gst_clock_rate
+        jitterbuffer = f"rtpjitterbuffer latency={self.jitter_buffer_ms}"
+        capssetter = ""
+        if fix == "capssetter":
+            udp_clock = 16000
+            capssetter = (
+                "! capssetter replace=true "
+                f'caps="application/x-rtp,media=audio,clock-rate={codec.gst_clock_rate},'
+                f'encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
+            )
+        elif fix == "jbnone":
+            jitterbuffer = f"rtpjitterbuffer mode=none latency={self.jitter_buffer_ms}"
+        # Browser-facing Opus: in-band FEC lets the browser reconstruct dropped
+        # packets (helps 4G) but is overhead on a clean link. packet-loss=0 => no
+        # FEC. audio-type generic sounds less processed than voice.
+        fec = "true" if self.opus_packet_loss_percentage > 0 else "false"
         return (
             f"udpsrc name=station_rtp_src port={self.local_rtp_port} "
-            f'caps="application/x-rtp,media=audio,clock-rate={codec.gst_clock_rate},encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
-            f"! queue ! rtpjitterbuffer latency={self.jitter_buffer_ms} "
+            f'caps="application/x-rtp,media=audio,clock-rate={udp_clock},encoding-name={codec.encoding_name},payload={self.selected_payload_type}" '
+            f"! queue ! {jitterbuffer} {capssetter}"
             f"! {codec.depay} ! {codec.decoder} ! audioconvert ! audioresample "
             "! audio/x-raw,rate=48000,channels=1 "
-            # Browser-facing Opus tuned for lossy links (WiFi/4G): in-band FEC lets
-            # the browser reconstruct dropped packets, packet-loss-percentage sizes
-            # that redundancy, audio-type=voice optimizes speech. This is where a
-            # SIP bridge earns "answer anywhere with good quality".
-            f"! queue ! opusenc audio-type=voice inband-fec=true packet-loss-percentage=15 "
+            f"! queue ! opusenc audio-type={self.opus_audio_type} inband-fec={fec} packet-loss-percentage={self.opus_packet_loss_percentage} "
             f"! rtpopuspay name=browser_audio_pay pt={self.webrtc_opus_payload_type} "
             f'! capsfilter name=browser_audio_caps caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload={self.webrtc_opus_payload_type}" '
             "! queue ! webrtcbin name=webrtc"
         )
+
+    def _install_ts6_clock_probe(self, pipeline: Any) -> None:
+        """Rewrite the RTP timestamp field x6 on ingress (clock_fix=ts6).
+
+        Hikvision stamps 320 units per 40ms Opus frame (an 8000 cadence) while
+        declaring OPUS/16000; the pipeline runs at the RFC-mandated 48000 clock, so
+        the media clock advances 6x too slow vs wall-clock. Multiplying the RTP
+        timestamp by 6 (320 -> 1920 = 40ms @ 48000) restores real time BEFORE the
+        jitterbuffer, so webrtcbin's live sync sees a correct clock. This rewrites
+        the RTP header field (bytes 4-8), NOT the GStreamer buffer PTS — unlike the
+        removed 0-based-PTS probe that broke webrtcbin. Proven to preroll in the lab.
+        """
+        src = pipeline.get_by_name("station_rtp_src")
+        if src is None:
+            return
+        pad = src.get_static_pad("src")
+
+        def _rewrite(_pad: Any, info: Any) -> Any:
+            buf = info.get_buffer()
+            ok, mapinfo = buf.map(self._gst.MapFlags.READ | self._gst.MapFlags.WRITE)
+            if ok:
+                try:
+                    if mapinfo.size >= 8:
+                        raw = bytearray(mapinfo.data)
+                        ts = struct.unpack(">I", bytes(raw[4:8]))[0]
+                        raw[4:8] = struct.pack(">I", (ts * 6) & 0xFFFFFFFF)
+                        mapinfo.data[: len(raw)] = raw
+                finally:
+                    buf.unmap(mapinfo)
+            return self._gst.PadProbeReturn.OK
+
+        pad.add_probe(self._gst.PadProbeType.BUFFER, _rewrite)
+        LOGGER.info("rtp_clock_fix_ts6_installed call_id=%s", self.call_id)
 
     async def _run_gst_offer_answer(self, sdp: str) -> str:
         future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
