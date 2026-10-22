@@ -279,3 +279,24 @@ def _bridge(codec, pt, station_clock):
         remote_rtp_ip="192.168.18.30", remote_rtp_port=9654,
         selected_codec=codec, selected_payload_type=pt, station_clock_rate=station_clock,
     )
+
+
+def test_gstreamer_bridge_capssetter_uses_hikvision_8k_wire_clock() -> None:
+    # Hikvision stamps 320 units per 40ms Opus frame (8000 cadence) while the SDP
+    # says OPUS/16000. capssetter must feed the jitterbuffer the real 8000 cadence,
+    # then rewrite caps to the 48000 rtpopusdepay requires.
+    bridge = GStreamerWebRtcBridge(
+        call_id="call-capssetter",
+        local_media_ip="192.168.0.2",
+        local_rtp_port=40000,
+        remote_rtp_ip="192.168.18.30",
+        remote_rtp_port=9654,
+        selected_codec="OPUS",
+        selected_payload_type=115,
+        clock_fix="capssetter",
+    )
+    pipeline = bridge._pipeline_description()
+    udpsrc = pipeline.split("!")[0]
+    assert "clock-rate=8000,encoding-name=OPUS,payload=115" in udpsrc
+    assert 'capssetter replace=true caps="application/x-rtp,media=audio,clock-rate=48000,encoding-name=OPUS,payload=115"' in pipeline
+    assert pipeline.index("rtpjitterbuffer") < pipeline.index("capssetter") < pipeline.index("rtpopusdepay")

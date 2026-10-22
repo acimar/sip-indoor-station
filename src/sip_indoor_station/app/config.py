@@ -66,7 +66,7 @@ class Config:
     opus_packet_loss_percentage: int = env_int("OPUS_PACKET_LOSS_PERCENTAGE", 15)
     # Receive-side clock correction for the Hikvision OPUS/16000 quirk (stamps 320
     # units per 40ms frame = an 8000 cadence while the pipeline runs at 48000).
-    # off | ts6 (rewrite RTP ts x6) | capssetter (advertise 16000 -> caps 48000) |
+    # off | ts6 (rewrite RTP ts x6) | capssetter (advertise wire 8000 -> caps 48000) |
     # jbnone (rtpjitterbuffer mode=none). Only applied for OPUS.
     rtp_clock_fix: str = (os.getenv("RTP_CLOCK_FIX") or "off").strip().lower()
     http_port: int = int(os.getenv("HTTP_PORT", "8080"))

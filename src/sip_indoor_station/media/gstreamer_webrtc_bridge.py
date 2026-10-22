@@ -16,6 +16,11 @@ from sip_indoor_station.media.gstreamer_check import check_required_elements
 LOGGER = logging.getLogger(__name__)
 
 
+# Hikvision stamps Opus RTP at an 8000 cadence (320 units per 40ms frame)
+# while declaring OPUS/16000 in SDP; RFC 7587 mandates 48000.
+HIKVISION_OPUS_WIRE_CLOCK = 8000
+
+
 @dataclass(frozen=True)
 class SipAudioCodecElements:
     encoding_name: str
@@ -354,8 +359,10 @@ class GStreamerWebRtcBridge(MediaSession):
         #                still resync => the browser-side "robotic cuts").
         #   ts6        — rewrite the RTP timestamp x6 at ingress (installed in
         #                _build_pipeline), restoring a true 40ms/48000 cadence.
-        #   capssetter — advertise the real 16000 into the jitterbuffer, then
-        #                rewrite caps to the 48000 rtpopusdepay mandates (lab V3).
+        #   capssetter — advertise the REAL wire cadence (8000: 320 units per 40ms,
+        #                measured by tcpdump 2026-10-16 = 8194/s) into the
+        #                jitterbuffer, then rewrite caps to the 48000 rtpopusdepay
+        #                mandates. (16000 = the SDP's claim = still 2x off.)
         #   jbnone     — rtpjitterbuffer mode=none (no timestamp-based scheduling).
         is_opus = self.selected_codec == "OPUS"
         fix = self.clock_fix if is_opus else "off"
@@ -363,7 +370,7 @@ class GStreamerWebRtcBridge(MediaSession):
         jitterbuffer = f"rtpjitterbuffer latency={self.jitter_buffer_ms}"
         capssetter = ""
         if fix == "capssetter":
-            udp_clock = 16000
+            udp_clock = HIKVISION_OPUS_WIRE_CLOCK
             capssetter = (
                 "! capssetter replace=true "
                 f'caps="application/x-rtp,media=audio,clock-rate={codec.gst_clock_rate},'
